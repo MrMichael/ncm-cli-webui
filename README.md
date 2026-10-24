@@ -4,6 +4,11 @@
 
 单文件 Python 标准库实现，零第三方依赖。
 
+<p align="center">
+  <img src="docs/screenshot-control.png" width="320" alt="遥控页：播放状态、进度、播放模式、双音量、限时倒计时">
+  <img src="docs/screenshot-playlists.png" width="320" alt="选歌抽屉：我的收藏歌单，可整单播放或进曲目列表点播">
+</p>
+
 ## 为什么需要它
 
 `ncm-cli` 本身只有命令行。这个页面把它的能力包成 HTTP 接口 + 移动端 UI，方便在家里用手机控制本机播放（比如给孩子放儿歌）。
