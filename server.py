@@ -76,6 +76,18 @@ def mpv(*commands, timeout=2.0):
         return None
 
 
+def mpv_ready():
+    return os.path.exists(MPV_SOCK) and mpv(("get_property", "pause")) is not None
+
+
+def mpv_running():
+    try:
+        return bool(subprocess.run(["pgrep", "-x", "mpv"],
+                                   capture_output=True, timeout=5).stdout.strip())
+    except Exception:
+        return False
+
+
 def mpv_props(*names):
     resp = mpv(*[("get_property", n) for n in names])
     if not resp:
@@ -192,6 +204,7 @@ def build_state():
         "reachable": p["reachable"],
         "mode": RT["mode"],
         "timerRemaining": remaining,
+        "degraded": status == "playing" and not p["reachable"],
         "lastName": (RT["last"] or {}).get("name") or "",
         "reloading": RT["reloading"],
     }
@@ -254,8 +267,21 @@ def apply_mode():
 
 
 def clear_and_wait():
+    """清队列并彻底重置播放器。
+
+    ncm-cli 每次 play 都会新起一个 mpv；若旧 mpv 还占着 mpv.sock，新 mpv 绑不上就会
+    "无声无 IPC"地播放。旧 mpv 退出时又会 unlink 掉同路径文件，所以必须先把所有
+    mpv 杀干净、确认进程退出、再删残留 socket，之后才让 ncm-cli 拉新的。
+    """
     ncm_run("queue", "clear")
     wait_until(is_stopped, 3.0)
+    subprocess.run(["pkill", "-x", "mpv"], capture_output=True, timeout=5)
+    wait_until(lambda: not mpv_running(), 6.0)
+    if not mpv_running():
+        try:
+            os.unlink(MPV_SOCK)
+        except OSError:
+            pass
 
 
 def start_playlist(enc, orig, name, skip=0):
@@ -276,6 +302,20 @@ def start_playlist(enc, orig, name, skip=0):
                 time.sleep(0.15)
             save_last(enc, orig, name)
             apply_mode()
+            if started and not wait_until(mpv_ready, 6.0):
+                # mpv 在跑但 IPC socket 丢了（ncm-cli 的竞态），重来一次
+                print("[play] mpv.sock 缺失，重启播放栈重试", flush=True)
+                ncm_run("stop")
+                wait_until(lambda: not mpv_running(), 10.0)
+                if not mpv_running():
+                    try:
+                        os.unlink(MPV_SOCK)
+                    except OSError:
+                        pass
+                ncm_run("play", "--playlist", "--encrypted-id", enc,
+                        "--original-id", str(orig), timeout=30)
+                started = wait_until(lambda: build_state()["status"] != "stopped", 10.0)
+                apply_mode()
             RT["was_playing"] = started
             print(f"[play] 开始播放={started}", flush=True)
             return ok and started
@@ -505,6 +545,7 @@ PAGE = r"""<!DOCTYPE html>
     color:var(--amber); border:1px solid var(--line); font-variant-numeric:tabular-nums;
   }
   .chip.hidden{display:none}
+  .chip.warn{color:#ffb4a2; background:#3a1f1f; border-color:#6b3a30}
   .iconbtn{
     font-size:12px; padding:5px 11px; border-radius:99px; background:var(--surface);
     border:1px solid var(--line); color:var(--text);
@@ -611,6 +652,7 @@ PAGE = r"""<!DOCTYPE html>
     <span class="badge"><span class="dot" id="dot"></span><span id="statusText">连接中</span></span>
     <span class="head-right">
       <span class="chip hidden" id="timerChip">⏱ <span id="timerText"></span></span>
+      <button class="chip warn hidden" id="reconnect">控制离线 · 重连</button>
       <button class="iconbtn" id="openSheet">选歌</button>
     </span>
   </header>
@@ -718,7 +760,7 @@ async function refresh() {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (r.status === 401) { location.href = "/"; return; }
     state = await r.json();
-    $("offline").classList.toggle("show", !state.reachable);
+    $("offline").classList.toggle("show", !state.reachable && state.status === "stopped");
   } catch (e) {
     $("offline").classList.add("show");
     return;
@@ -752,7 +794,12 @@ function render() {
   if (s.timerRemaining > 0) { tc.classList.remove("hidden"); $("timerText").textContent = fmt(s.timerRemaining); }
   else tc.classList.add("hidden");
 
-  if (!dragging.pv) { $("pv").value = s.playerVolume; $("pvo").value = s.playerVolume + "%"; }
+  $("reconnect").classList.toggle("hidden", !s.degraded);
+
+  if (!dragging.pv) {
+    if (s.degraded) { $("pvo").value = "—"; $("pv").disabled = true; }
+    else { $("pv").disabled = false; $("pv").value = s.playerVolume; $("pvo").value = s.playerVolume + "%"; }
+  }
   if (!dragging.sv && s.systemVolume !== null) { $("sv").value = s.systemVolume; $("svo").value = s.systemVolume + "%"; }
 
   const showResume = s.status === "stopped" && s.lastName;
@@ -762,6 +809,7 @@ function render() {
 
 $("toggle").onclick = () => api("/api/toggle").then(() => setTimeout(refresh, 150));
 $("resume").onclick = () => api("/api/resume-last").then(() => setTimeout(refresh, 600));
+$("reconnect").onclick = () => api("/api/recover").then(() => setTimeout(refresh, 900));
 $("next").onclick = () => api("/api/next").then(() => setTimeout(refresh, 300));
 $("prev").onclick = () => api("/api/prev").then(() => setTimeout(refresh, 300));
 
@@ -1107,6 +1155,22 @@ class Handler(BaseHTTPRequestHandler):
                 playlist = (body["playlistEnc"], body.get("playlistOrig"), body.get("playlistName") or "")
             ok = start_track(song_enc, song_orig, playlist, body.get("index"))
             self._json({"ok": bool(ok)})
+            return
+
+        if path == "/api/recover":
+            last = dict(RT["last"] or {})
+            if not last.get("enc"):
+                self._json({"ok": False, "error": "no-last"}, 400)
+                return
+            ncm_run("stop")
+            wait_until(lambda: not mpv_running(), 10.0)
+            if not mpv_running():
+                try:
+                    os.unlink(MPV_SOCK)
+                except OSError:
+                    pass
+            ok = start_playlist(last["enc"], last.get("orig"), last.get("name") or "")
+            self._json({"ok": bool(ok), "state": build_state()})
             return
 
         if path == "/api/resume-last":

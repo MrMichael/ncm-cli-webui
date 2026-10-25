@@ -113,7 +113,7 @@ loginctl enable-linger "$USER"     # 未登录也启动
 
 - **歌单循环重放有约 3 秒空隙**：daemon 一次只喂 mpv 一首歌，没法做无缝循环。
 - **限时播放存在内存里**：重启服务或重启机器会丢。
-- **状态判定有兜底**：`ncm-cli stop` 会连带杀掉 daemon 与 mpv；若新 mpv 因 socket 竞态没绑上 IPC，服务会回退用 daemon 的 `status` 判断，避免误判为「已停止」而反复重放。
+- **mpv IPC socket 竞态（已处理）**：`ncm-cli` 每次 `play` 都会新起一个 mpv。若旧 mpv 还占着 `mpv.sock`，新 mpv 绑不上就会「在放歌但没有 IPC」——页面表现为曲子在走、音量显示 0、却报「连不上播放服务」；而旧 mpv 退出时又会 unlink 掉同路径文件，把新 mpv 的 socket 一起带走。现在的做法是：起播前 `pkill -x mpv`、确认进程真正退出、删掉残留 socket，再让 `ncm-cli` 拉新的播放器。另外页面在检测到该状态时会显示「控制离线 · 重连」（走 `/api/recover`），而不是误导性的离线横幅。
 - **英文儿歌版权敏感**：开放平台对不同厂牌授权不同，部分歌单可播率极低（实测 Super Simple Songs 为 0%），页面会过滤掉不可播曲目。
 
 ## 安全
