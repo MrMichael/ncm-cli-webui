@@ -49,6 +49,7 @@ RT = {
     "stopped_ticks": 0,
     "replay_guard": 0.0,
     "reloading": False,
+    "loop_guard": 0.0,
 }
 
 
@@ -428,6 +429,19 @@ def tick():
         ncm_run("stop")
         return
 
+    # 单曲循环：daemon 在 EOF 时会自己跳下一首（mpv 的 loop-file 拦不住它），
+    # 所以在临近结尾时主动 seek 回 0，永远不给它走到 EOF 的机会。
+    if (
+        RT["mode"] == "loop-one"
+        and st["status"] == "playing"
+        and st["duration"] > 3
+        and st["position"] >= st["duration"] - 0.8
+        and time.time() > RT["loop_guard"]
+    ):
+        RT["loop_guard"] = time.time() + 3
+        mpv(("seek", 0, "absolute"))
+        print("[loop-one] 回到开头", flush=True)
+
     # 歌单循环：确认停了（连续两次 tick）再重放，45 秒冷却防止反复触发
     if st["status"] == "stopped":
         RT["stopped_ticks"] += 1
@@ -464,7 +478,8 @@ def replay_worker(last):
 
 def watchdog():
     while True:
-        time.sleep(1.5)
+        # 单曲循环要在结尾前精确掐断，所以轮询更勤
+        time.sleep(0.5 if RT["mode"] == "loop-one" else 1.5)
         try:
             tick()
         except Exception as exc:
