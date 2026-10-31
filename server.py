@@ -352,6 +352,8 @@ def append_rest(gen, enc, start_index):
     for t in tracks[start_index:]:
         if gen != RT["gen"]:
             return
+        if not t.get("playable", True):
+            continue
         ncm_run("queue", "add", "--encrypted-id", t["enc"],
                 "--original-id", str(t["orig"]))
         time.sleep(0.05)
@@ -388,20 +390,33 @@ def my_playlists(kind):
     return cached(("mypl", kind), 300, fetch)
 
 
+def playlist_info(enc):
+    def fetch():
+        d = ncm_json("playlist", "get", "--playlistId", enc,
+                     "--userInput", "读取歌单信息").get("data") or {}
+        return {"name": d.get("name") or "", "count": d.get("trackCount") or 0,
+                "orig": d.get("originalId")}
+    return cached(("info", enc), 300, fetch)
+
+
 def playlist_tracks(enc):
     def fetch():
         data = ncm_json("playlist", "tracks", "--playlistId", enc, "--limit", "200",
                         "--userInput", "浏览歌单曲目")
         out = []
         for r in records_of(data):
-            if not (r.get("visible") and r.get("playFlag")):
-                continue
+            ok = bool(r.get("visible") and r.get("playFlag"))
+            reason = ""
+            if not ok:
+                reason = "应用不可见" if not r.get("visible") else "无播放权"
             out.append({
                 "enc": r["id"],
                 "orig": r.get("originalId"),
                 "name": r.get("name") or "",
                 "artist": (r.get("artists") or [{}])[0].get("name") or "",
                 "ms": r.get("duration") or 0,
+                "playable": ok,
+                "reason": reason,
             })
         return out
     return cached(("tracks", enc), 300, fetch)
@@ -645,6 +660,15 @@ PAGE = r"""<!DOCTYPE html>
   .row .meta{font-size:12px; color:var(--muted); margin-top:2px}
   .row .go{font-size:12px; color:var(--amber); padding:7px 10px; border-radius:8px;
            background:var(--amber-soft); white-space:nowrap}
+  .row.dim{opacity:.42}
+  .row.dim .nm{text-decoration:line-through; text-decoration-color:#7a4a4a}
+  .tag{font-size:11px; padding:2px 7px; border-radius:6px; background:#3a1f1f;
+       color:#ffb4a2; margin-left:6px; white-space:nowrap}
+  .toast{position:fixed; left:50%; bottom:calc(96px + env(safe-area-inset-bottom));
+    transform:translate(-50%,20px); background:#2b3448; color:#edeff5; font-size:13px;
+    padding:10px 16px; border-radius:10px; opacity:0; transition:.2s; z-index:30;
+    max-width:82vw; text-align:center; pointer-events:none}
+  .toast.show{opacity:1; transform:translate(-50%,0)}
   .empty{padding:26px 16px; text-align:center; color:var(--faint); font-size:13px; line-height:1.6}
   .spin{display:inline-block; animation:sp 1s linear infinite}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -896,6 +920,16 @@ $("back").onclick = () => { view.level = "lists"; $("back").style.visibility = "
 
 function showTabs(on) { $("tabs").style.display = on ? "flex" : "none"; }
 
+let toastTimer = null;
+function toast(msg) {
+  let el = document.getElementById("toast");
+  if (!el) { el = document.createElement("div"); el.id = "toast"; el.className = "toast"; document.body.appendChild(el); }
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+}
+
 const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 const rate = (p) => {
@@ -935,6 +969,7 @@ async function loadTracks(p) {
   showTabs(false);
   $("back").style.visibility = "visible";
   $("sheetTitle").textContent = p.name;
+
   $("list").innerHTML = '<div class="empty"><span class="spin">◐</span> 读取曲目</div>';
   const r = await fetch("/api/playlist/tracks?enc=" + encodeURIComponent(p.enc), { cache: "no-store" });
   const data = await r.json();
@@ -944,14 +979,18 @@ async function loadTracks(p) {
     return;
   }
   $("list").innerHTML = tracks.map((t, i) => `
-    <div class="row" data-i="${i}">
+    <div class="row ${t.playable ? "" : "dim"}" data-i="${i}">
       <div class="info">
-        <div class="nm">${esc(t.name)}</div>
+        <div class="nm">${esc(t.name)}${t.playable ? "" : `<span class="tag">${esc(t.reason)}</span>`}</div>
         <div class="meta">${esc(t.artist)} · ${fmt(t.ms / 1000)}</div>
       </div>
     </div>`).join("");
   $("list").querySelectorAll(".row").forEach((row) => {
-    row.onclick = () => playTrack(tracks[Number(row.dataset.i)], Number(row.dataset.i));
+    const t = tracks[Number(row.dataset.i)];
+    row.onclick = () => {
+      if (!t.playable) { toast("《" + t.name + "》开放平台" + t.reason + "，只能在网易云 App 里播"); return; }
+      playTrack(t, Number(row.dataset.i));
+    };
   });
 }
 
@@ -982,8 +1021,17 @@ document.addEventListener("keydown", (e) => {
 refresh();
 setInterval(refresh, 1200);
 
-// 深链接：/ #sheet 直接拉起歌单抽屉
+// 深链接：#sheet 拉起歌单抽屉；#tracks=<歌单加密ID> 直接看曲目
 if (location.hash === "#sheet") { $("openSheet").click(); }
+else if (location.hash.startsWith("#tracks=")) {
+  const enc = decodeURIComponent(location.hash.slice(8));
+  view.playlist = { enc, name: "曲目" };
+  openSheet($("sheet"));
+  fetch("/api/playlist/info?enc=" + encodeURIComponent(enc))
+    .then((r) => r.json())
+    .then((d) => { if (d.name) view.playlist.name = d.name; loadTracks(view.playlist); })
+    .catch(() => loadTracks(view.playlist));
+}
 </script>
 </body>
 </html>
@@ -1062,6 +1110,11 @@ class Handler(BaseHTTPRequestHandler):
             if kind not in ("collected", "created"):
                 kind = "collected"
             self._json({"items": my_playlists(kind)})
+            return
+
+        if path == "/api/playlist/info":
+            enc = q.get("enc", [""])[0]
+            self._json(playlist_info(enc) if enc else {})
             return
 
         if path == "/api/playlist/tracks":

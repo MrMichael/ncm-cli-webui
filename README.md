@@ -7,6 +7,7 @@
 <p align="center">
   <img src="docs/screenshot-control.png" width="320" alt="遥控页：播放状态、进度、播放模式、双音量、限时倒计时">
   <img src="docs/screenshot-playlists.png" width="320" alt="选歌抽屉：我的收藏歌单，可整单播放或进曲目列表点播">
+  <img src="docs/screenshot-unplayable.png" width="320" alt="不可播曲目会灰显并标出原因，而不是被静默过滤">
 </p>
 
 ## 为什么需要它
@@ -87,7 +88,8 @@ loginctl enable-linger "$USER"     # 未登录也启动
 | POST | `/api/mode` | `{mode}`：`sequential` / `loop-list` / `loop-one` |
 | POST | `/api/timer` | `{minutes}`，`0` 取消 |
 | GET | `/api/my/playlists` | `?kind=collected\|created` |
-| GET | `/api/playlist/tracks` | `?enc=<歌单加密ID>` |
+| GET | `/api/playlist/info` | `?enc=<歌单加密ID>`（名字/曲目数） |
+| GET | `/api/playlist/tracks` | `?enc=<歌单加密ID>`，含 `playable` / `reason` |
 | POST | `/api/play/playlist` | `{enc, orig, name}` 整单播放 |
 | POST | `/api/play/track` | `{songEnc, songOrig, index, playlistEnc, playlistOrig, playlistName}` |
 | POST | `/api/resume-last` | 继续上次 |
@@ -114,7 +116,7 @@ loginctl enable-linger "$USER"     # 未登录也启动
 - **歌单循环重放有约 3 秒空隙**：daemon 一次只喂 mpv 一首歌，没法做无缝循环。
 - **限时播放存在内存里**：重启服务或重启机器会丢。
 - **mpv IPC socket 竞态（已处理）**：`ncm-cli` 每次 `play` 都会新起一个 mpv。若旧 mpv 还占着 `mpv.sock`，新 mpv 绑不上就会「在放歌但没有 IPC」——页面表现为曲子在走、音量显示 0、却报「连不上播放服务」；而旧 mpv 退出时又会 unlink 掉同路径文件，把新 mpv 的 socket 一起带走。现在的做法是：起播前 `pkill -x mpv`、确认进程真正退出、删掉残留 socket，再让 `ncm-cli` 拉新的播放器。另外页面在检测到该状态时会显示「控制离线 · 重连」（走 `/api/recover`），而不是误导性的离线横幅。
-- **英文儿歌版权敏感**：开放平台对不同厂牌授权不同，部分歌单可播率极低（实测 Super Simple Songs 为 0%），页面会过滤掉不可播曲目。
+- **可播率由开放平台逐曲授权决定，与会员无关**：`playFlag` / `visible` 才决定这件事能不能放，`vipFlag` / `songFee` 只影响客户端。实测同一账号下《晴天》（VIP 曲）可播，而《海上钢琴师》原声 20 首全部 `visible=false`、Super Simple Songs 整单 0%。曲目列表现在会**灰显不可播曲目并标注原因**（`无播放权` / `应用不可见`），不再静默过滤。
 
 ## 安全
 
