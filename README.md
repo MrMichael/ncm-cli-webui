@@ -118,6 +118,34 @@ loginctl enable-linger "$USER"     # 未登录也启动
 - **mpv IPC socket 竞态（已处理）**：`ncm-cli` 每次 `play` 都会新起一个 mpv。若旧 mpv 还占着 `mpv.sock`，新 mpv 绑不上就会「在放歌但没有 IPC」——页面表现为曲子在走、音量显示 0、却报「连不上播放服务」；而旧 mpv 退出时又会 unlink 掉同路径文件，把新 mpv 的 socket 一起带走。现在的做法是：起播前 `pkill -x mpv`、确认进程真正退出、删掉残留 socket，再让 `ncm-cli` 拉新的播放器。另外页面在检测到该状态时会显示「控制离线 · 重连」（走 `/api/recover`），而不是误导性的离线横幅。
 - **可播率由开放平台逐曲授权决定，与会员无关**：`playFlag` / `visible` 才决定这件事能不能放，`vipFlag` / `songFee` 只影响客户端。实测同一账号下《晴天》（VIP 曲）可播，而《海上钢琴师》原声 20 首全部 `visible=false`、Super Simple Songs 整单 0%。曲目列表现在会**灰显不可播曲目并标注原因**（`无播放权` / `应用不可见`），不再静默过滤。
 
+## 排查：没有声音
+
+`mpv` 在正常播放、进度在走，但扬声器没声音 —— 先看输出设备：
+
+```bash
+pactl list short sinks
+```
+
+如果只有 `auto_null`（Dummy Output），说明 PipeWire 打不开声卡：
+
+```bash
+amixer -c 1 sget Master      # 报 Invalid card number → 确认是权限问题
+id -nG                       # 没有 audio 组
+getfacl /dev/snd/controlC1   # 只有 gdm 有 ACL，没有你
+```
+
+原因：`/dev/snd/*` 是 `root:audio 660`，SSH 会话没有 seat，systemd-logind 的 `uaccess` 不会给你发 ACL。
+
+修复（三条都要）：
+
+```bash
+sudo usermod -aG audio "$USER"              # 永久，需重新登录生效
+sudo setfacl -m u:$USER:rw /dev/snd/*       # 立即，重启后失效
+systemctl --user restart wireplumber pipewire pipewire-pulse
+```
+
+页面现在会直接提示「系统音频未就绪」，不用再靠猜。
+
 ## 安全
 
 - 只读 token 才能访问，token 在 cookie 里是 `HttpOnly`。

@@ -138,6 +138,15 @@ def ncm_state():
     return (ncm_json("state").get("state") or {})
 
 
+def default_sink():
+    try:
+        r = subprocess.run(["pactl", "get-default-sink"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
 def system_volume():
     try:
         r = subprocess.run(
@@ -180,6 +189,7 @@ def build_state():
     p = raw_playback()
     st = cached("ncm", 2.0, ncm_state)
     sysvol = cached("sysvol", 2.0, system_volume)
+    sink = cached("sink", 5.0, default_sink)
 
     if not p["reachable"]:
         # mpv 的 IPC socket 丢了（例如端口竞态）但音频可能还在放，回退用 daemon 的状态
@@ -206,6 +216,8 @@ def build_state():
         "mode": RT["mode"],
         "timerRemaining": remaining,
         "degraded": status == "playing" and not p["reachable"],
+        "sink": sink,
+        "audioFallback": "auto_null" in (sink or ""),
         "lastName": (RT["last"] or {}).get("name") or "",
         "reloading": RT["reloading"],
     }
@@ -691,6 +703,7 @@ PAGE = r"""<!DOCTYPE html>
     <span class="badge"><span class="dot" id="dot"></span><span id="statusText">连接中</span></span>
     <span class="head-right">
       <span class="chip hidden" id="timerChip">⏱ <span id="timerText"></span></span>
+      <button class="chip warn hidden" id="audioWarn">系统音频未就绪</button>
       <button class="chip warn hidden" id="reconnect">控制离线 · 重连</button>
       <button class="iconbtn" id="openSheet">选歌</button>
     </span>
@@ -834,6 +847,7 @@ function render() {
   else tc.classList.add("hidden");
 
   $("reconnect").classList.toggle("hidden", !s.degraded);
+  $("audioWarn").classList.toggle("hidden", !s.audioFallback);
 
   if (!dragging.pv) {
     if (s.degraded) { $("pvo").value = "—"; $("pv").disabled = true; }
@@ -849,6 +863,7 @@ function render() {
 $("toggle").onclick = () => api("/api/toggle").then(() => setTimeout(refresh, 150));
 $("resume").onclick = () => api("/api/resume-last").then(() => setTimeout(refresh, 600));
 $("reconnect").onclick = () => api("/api/recover").then(() => setTimeout(refresh, 900));
+$("audioWarn").onclick = () => toast("声卡没被 PipeWire 打开，输出掉到了 Dummy。检查 /dev/snd 权限后重启 wireplumber");
 $("next").onclick = () => api("/api/next").then(() => setTimeout(refresh, 300));
 $("prev").onclick = () => api("/api/prev").then(() => setTimeout(refresh, 300));
 
