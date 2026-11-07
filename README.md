@@ -146,6 +146,29 @@ systemctl --user restart wireplumber pipewire pipewire-pulse
 
 页面现在会直接提示「系统音频未就绪」，不用再靠猜。
 
+### 声卡正常但依然没声音：输出端口选错
+
+```bash
+pactl list sinks | grep -E "Ports:|Out\]|Active Port" -A0
+```
+
+典型表现：
+
+```
+Ports:
+    [Out] Line1: Line Output        (priority 300, not available)   ← 没接东西
+    [Out] Line2: Second Line Output (priority 250)
+Active Port: [Out] Line1                                            ← 声音去了空口
+```
+
+`Line1` 优先级更高但不通，于是声音被送进没人接的插孔。切到实际接线的那一口：
+
+```bash
+pactl set-sink-port "$(pactl get-default-sink)" "[Out] Line2"
+```
+
+WirePlumber 会把选择写进 `~/.local/state/wireplumber/default-routes`，之后重启不再回退。
+
 ## 安全
 
 - 只读 token 才能访问，token 在 cookie 里是 `HttpOnly`。
