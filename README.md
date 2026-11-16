@@ -146,6 +146,10 @@ systemctl --user restart wireplumber pipewire pipewire-pulse
 
 页面现在会直接提示「系统音频未就绪」，不用再靠猜。
 
+### 按「播放」没反应
+
+机器重启后 `mpv` 和 `ncm-cli` 的 player-daemon 都不存在（它们是 `ncm-cli play` 拉起来的临时进程），此时 `ncm-cli resume` 是空操作。现在 `/api/toggle` 在续播失败时会自动回退到「重放上次歌单」，首次播放约需 5~7 秒。
+
 ### 声卡正常但依然没声音：输出端口选错
 
 ```bash

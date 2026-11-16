@@ -1060,6 +1060,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
+
     def _token_ok(self):
         q = parse_qs(urlparse(self.path).query)
         if q.get("t", [""])[0] == TOKEN:
@@ -1154,6 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/toggle":
             st = build_state()
             if st["status"] == "stopped":
+                # 先尝试原地续播（daemon 还记着队列）
                 ncm_run("resume")
                 time.sleep(0.2)
                 if not is_stopped():
@@ -1161,8 +1168,11 @@ class Handler(BaseHTTPRequestHandler):
                     RT["expired"] = False
                     apply_mode()
                 else:
-                    self._json({"ok": True, "hint": "no-queue"})
-                    return
+                    # 机器重启后 daemon 和队列都没了：直接重放上次歌单，
+                    # 让"播放"按钮永远有反应，而不是静默失败
+                    if not do_resume_last():
+                        self._json({"ok": False, "error": "nothing-to-play"})
+                        return
             else:
                 mpv(("cycle", "pause"))
             self._json({"ok": True})
